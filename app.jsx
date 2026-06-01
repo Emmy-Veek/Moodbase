@@ -68,6 +68,22 @@ const FACET_PILLS = [
   ["platform","Mobile"],
 ];
 
+const FACETS = {
+  industry:  ["Agriculture","AI","CRM","Developer","E-commerce","Education","Fintech","Food","Gaming","Health","HR","Logistics","Media","Productivity","Real estate","SaaS","Social","Travel"],
+  style:     ["Bold","Brutalist","Calm","Clean","Colorful","Editorial","Friendly","Glassmorphism","Illustrated","Minimal","Monochrome","Playful","Soft","Technical","Warm"],
+  platform:  ["Desktop","Mobile","Tablet","Web"],
+};
+
+const COMPONENT_GROUPS = [
+  { label: "Navigation",        items: ["App bar / top nav","Sidebar / drawer","Tabs","Breadcrumbs","Pagination","Bottom nav bar","Stepper / progress steps"] },
+  { label: "Input & Forms",     items: ["Text input","Textarea","Dropdown / select","Checkbox","Radio button","Toggle / switch","Slider / range","Date picker / calendar","Color picker","File upload / drag-and-drop","Search bar","Number input / stepper"] },
+  { label: "Buttons & Actions", items: ["Button","Icon button","Button group / segmented control","Floating action button (FAB)","Split button"] },
+  { label: "Display & Content", items: ["Card","List / list item","Table","Badge / chip / tag","Avatar","Tooltip","Progress bar / spinner / skeleton","Divider","Banner / alert","Empty state","Stat / metric tile"] },
+  { label: "Overlays",          items: ["Modal / dialog","Drawer / side sheet","Popover","Dropdown menu / context menu","Toast / snackbar","Bottom sheet"] },
+  { label: "Media",             items: ["Image","Video player","Carousel / slider","Gallery / lightbox","Map"] },
+  { label: "Layout",            items: ["Grid","Accordion / collapsible","Tabs panel","Split pane","Timeline","Masonry"] },
+];
+
 /* ════════════════════════════════════════════════════════════
    ICONS  (stroke, inherit color)
    ════════════════════════════════════════════════════════════ */
@@ -724,7 +740,7 @@ function AssetCard({ a, onClick, onDelete }) {
             <button onClick={e => { e.stopPropagation(); setConfirming(true); }}
               style={{ all:"unset", position:"absolute", top:10, right:10, width:30, height:30,
                 borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center",
-                background:"rgba(193,75,50,.88)", color:"#fff", cursor:"pointer",
+                background:"rgba(0,0,0,.5)", color:"#fff", cursor:"pointer",
                 backdropFilter:"blur(4px)", transition:".14s" }}>
               <I.trash size={14} />
             </button>
@@ -750,6 +766,140 @@ function AssetCard({ a, onClick, onDelete }) {
   );
 }
 
+/* ════════════════════════════════════════════════════════════
+   FILTER DROPDOWN
+   ════════════════════════════════════════════════════════════ */
+
+function FilterDropdown({ label, options=[], groups=null, selected, onChange, searchable=true }) {
+  const [open, setOpen]     = useState(false);
+  const [search, setSearch] = useState('');
+  const ref       = useRef(null);
+  const searchRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) { setSearch(''); return; }
+    if (searchable) searchRef.current?.focus();
+    const onDown = e => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const q = search.toLowerCase();
+  const visibleGroups = groups
+    ? groups.map(g => ({ ...g, items: q ? g.items.filter(i => i.toLowerCase().includes(q)) : g.items }))
+            .filter(g => g.items.length > 0)
+    : null;
+  const visibleFlat = !groups && (searchable ? options.filter(o => o.toLowerCase().includes(q)) : options);
+  const hasResults  = groups ? visibleGroups.length > 0 : visibleFlat.length > 0;
+
+  const count  = selected.length;
+  const active = count > 0;
+
+  const toggle = val =>
+    onChange(selected.includes(val) ? selected.filter(v => v !== val) : [...selected, val]);
+
+  const OptionRow = ({ opt }) => {
+    const on = selected.includes(opt);
+    return (
+      <button key={opt} onClick={() => toggle(opt)} style={{
+        all:'unset', display:'flex', alignItems:'center', gap:10,
+        width:'100%', padding:'8px 14px', cursor:'pointer', boxSizing:'border-box',
+        fontSize:13.5, fontWeight: on ? 600 : 400,
+        color: on ? 'var(--text)' : 'var(--text-2)',
+        background: on ? 'var(--accent-soft)' : 'transparent',
+        transition:'.1s',
+      }}>
+        <span style={{ width:16, height:16, borderRadius:4, flex:'none', transition:'.12s',
+          border:`1.5px solid ${on ? 'var(--accent)' : 'var(--border-2)'}`,
+          background: on ? 'var(--accent)' : 'transparent',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          color:'var(--accent-ink)',
+        }}>
+          {on && <I.check size={10} />}
+        </span>
+        {opt}
+      </button>
+    );
+  };
+
+  return (
+    <div ref={ref} style={{ position:'relative' }}>
+      {/* Trigger button */}
+      <button onClick={() => setOpen(o => !o)} style={{
+        all:'unset', display:'flex', alignItems:'center', gap:6,
+        padding:'0 12px', height:38, borderRadius:'var(--r-sm)', cursor:'pointer',
+        fontFamily:'var(--font-body)', fontSize:13.5, fontWeight:600, whiteSpace:'nowrap',
+        border:`1px solid ${active ? 'var(--accent-line)' : 'var(--border-2)'}`,
+        background: active ? 'var(--accent-soft)' : 'var(--surface)',
+        color: active ? 'color-mix(in oklab, var(--accent) 80%, var(--text))' : 'var(--text-2)',
+        transition:'.14s',
+      }}>
+        {label}
+        {active && (
+          <span style={{ display:'inline-flex', alignItems:'center', justifyContent:'center',
+            width:18, height:18, borderRadius:999, fontSize:11, fontWeight:700,
+            background:'var(--accent)', color:'var(--accent-ink)' }}>
+            {count}
+          </span>
+        )}
+        <I.chevdown size={12} />
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div style={{ position:'absolute', top:'calc(100% + 6px)', left:0, zIndex:100,
+          background:'var(--surface)', border:'1px solid var(--border)',
+          borderRadius:'var(--r-md)', boxShadow:'var(--shadow-lg)',
+          minWidth:240, maxWidth:300, overflow:'hidden',
+          fontFamily:'var(--font-body)' }}>
+
+          {/* Search */}
+          {searchable && (
+            <div style={{ padding:'10px 10px 8px' }}>
+              <div className="field" style={{ padding:'7px 10px', gap:7 }}>
+                <I.search size={13} />
+                <input ref={searchRef} placeholder="Search…" value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  onClick={e => e.stopPropagation()} />
+              </div>
+            </div>
+          )}
+
+          {/* Options */}
+          <div style={{ maxHeight:320, overflowY:'auto', padding:'2px 0 6px' }}>
+            {!hasResults ? (
+              <p style={{ margin:0, padding:'10px 14px', fontSize:13, color:'var(--text-3)', textAlign:'center' }}>
+                No matches
+              </p>
+            ) : groups ? visibleGroups.map(g => (
+              <div key={g.label}>
+                <div style={{ padding:'10px 14px 4px', fontSize:11, fontWeight:700,
+                  letterSpacing:'.07em', textTransform:'uppercase', color:'var(--text-3)',
+                  borderTop: visibleGroups.indexOf(g) > 0 ? '1px solid var(--border)' : 'none',
+                  marginTop: visibleGroups.indexOf(g) > 0 ? 4 : 0 }}>
+                  {g.label}
+                </div>
+                {g.items.map(opt => <OptionRow key={opt} opt={opt} />)}
+              </div>
+            )) : visibleFlat.map(opt => <OptionRow key={opt} opt={opt} />)}
+          </div>
+
+          {/* Clear footer */}
+          {count > 0 && (
+            <div style={{ padding:'8px 14px', borderTop:'1px solid var(--border)' }}>
+              <button onClick={() => { onChange([]); setOpen(false); }}
+                style={{ all:'unset', fontSize:12.5, color:'var(--text-3)',
+                  cursor:'pointer', fontFamily:'var(--font-body)' }}>
+                Clear {label.toLowerCase()}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const SORT_OPTIONS = [
   { value:"recent", label:"Most recent" },
   { value:"oldest", label:"Oldest first" },
@@ -759,26 +909,48 @@ const SORT_OPTIONS = [
 
 function LibraryView({ assets, onUpdateAsset, onDeleteAsset, showToast, theme, onToggleTheme, onAddAsset, onNewProject, onTabChange }) {
   const [search, setSearch]               = useState("");
-  const [activeFilters, setActiveFilters] = useState([]);
   const [previewAsset, setPreviewAsset]   = useState(null);
   const [cols, setCols]                   = useState(4);
   const [sortBy, setSortBy]               = useState("recent");
+  const [filterIndustry,  setFilterIndustry]  = useState([]);
+  const [filterComponent, setFilterComponent] = useState([]);
+  const [filterPlatform,  setFilterPlatform]  = useState([]);
+  const [filterStyle,     setFilterStyle]     = useState([]);
+  const [filterTheme,     setFilterTheme]     = useState([]);
 
-  const toggleFilter = key =>
-    setActiveFilters(prev => prev.includes(key) ? prev.filter(f=>f!==key) : [...prev, key]);
+  const clearAll = () => {
+    setFilterIndustry([]); setFilterComponent([]);
+    setFilterPlatform([]); setFilterStyle([]); setFilterTheme([]);
+  };
+  const anyActive = filterIndustry.length + filterComponent.length +
+    filterPlatform.length + filterStyle.length + filterTheme.length > 0;
+
+  // Build options dynamically from what's actually in the library
+  const uniq = arr => [...new Set(arr)].sort();
+  const vals = dim => assets.flatMap(a => a.tags[dim] || []);
+  const industryOpts  = uniq([...FACETS.industry,  ...vals('industry')]);
+  const platformOpts  = uniq([...FACETS.platform,   ...vals('platform')]);
+  const componentGroups = COMPONENT_GROUPS.map(g => ({
+    ...g,
+    items: uniq([...g.items, ...vals('component').filter(v => g.items.includes(v))]),
+  }));
+  const themeOpts     = ['Dark mode', 'Light'];
+  const styleOpts     = uniq([...FACETS.style, ...vals('style')]
+    .filter(s => !themeOpts.includes(s)));
 
   const filtered = assets.filter(a => {
     const q = search.toLowerCase();
     const matchSearch = !q ||
       a.title.toLowerCase().includes(q) ||
       a.source.toLowerCase().includes(q) ||
-      Object.values(a.tags).flat().some(t=>t.toLowerCase().includes(q));
+      Object.values(a.tags).flat().some(t => t.toLowerCase().includes(q));
     if (!matchSearch) return false;
-    if (activeFilters.length===0) return true;
-    return activeFilters.every(key => {
-      const [dim, val] = key.split(":");
-      return (a.tags[dim]||[]).includes(val);
-    });
+    if (filterIndustry.length  && !filterIndustry.some(v  => (a.tags.industry  ||[]).includes(v))) return false;
+    if (filterComponent.length && !filterComponent.some(v => (a.tags.component ||[]).includes(v))) return false;
+    if (filterPlatform.length  && !filterPlatform.some(v  => (a.tags.platform  ||[]).includes(v))) return false;
+    if (filterStyle.length     && !filterStyle.some(v     => (a.tags.style     ||[]).includes(v))) return false;
+    if (filterTheme.length     && !filterTheme.some(v     => (a.tags.style     ||[]).includes(v))) return false;
+    return true;
   });
 
   const sorted = [...filtered].sort((a, b) => {
@@ -853,17 +1025,17 @@ function LibraryView({ assets, onUpdateAsset, onDeleteAsset, showToast, theme, o
             </div>
           </div>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-            <button className={"pill"+(activeFilters.length===0?" on":"")} onClick={()=>setActiveFilters([])}>All</button>
-            {FACET_PILLS.map(([dim,v],i)=>{
-              const key = `${dim}:${v}`;
-              const on = activeFilters.includes(key);
-              return (
-                <button key={i} className={"pill"+(on?" on":"")} onClick={()=>toggleFilter(key)}>
-                  {v}
-                </button>
-              );
-            })}
-            <span style={{ fontSize:13, color:"var(--text-3)", fontWeight:600, padding:"0 6px", cursor:"pointer" }}>+ more filters</span>
+            <FilterDropdown label="Industry"  options={industryOpts}  selected={filterIndustry}  onChange={setFilterIndustry} />
+            <FilterDropdown label="Component" groups={componentGroups} selected={filterComponent} onChange={setFilterComponent} />
+            <FilterDropdown label="Platform"  options={platformOpts}  selected={filterPlatform}  onChange={setFilterPlatform}  searchable={false} />
+            <FilterDropdown label="Style"     options={styleOpts}     selected={filterStyle}     onChange={setFilterStyle}     searchable={false} />
+            <FilterDropdown label="Theme"     options={themeOpts}     selected={filterTheme}     onChange={setFilterTheme}     searchable={false} />
+            {anyActive && (
+              <button onClick={clearAll} style={{ all:"unset", fontSize:13, color:"var(--text-3)",
+                cursor:"pointer", fontFamily:"var(--font-body)", padding:"0 4px" }}>
+                Clear all
+              </button>
+            )}
           </div>
         </div>
 
