@@ -5,6 +5,33 @@
 
 const { useState, useEffect, useRef } = React;
 
+/* ── IndexedDB helpers for video blob storage ── */
+const _dbPromise = new Promise((res, rej) => {
+  const req = indexedDB.open('moodbase_videos', 1);
+  req.onupgradeneeded = e => e.target.result.createObjectStore('videos');
+  req.onsuccess = e => res(e.target.result);
+  req.onerror  = e => rej(e.target.error);
+});
+
+const idbPut = (key, blob) => _dbPromise.then(db => new Promise((res, rej) => {
+  const tx = db.transaction('videos', 'readwrite');
+  tx.objectStore('videos').put(blob, key);
+  tx.oncomplete = res; tx.onerror = e => rej(e.target.error);
+}));
+
+const idbGet = (key) => _dbPromise.then(db => new Promise((res, rej) => {
+  const tx = db.transaction('videos', 'readonly');
+  const req = tx.objectStore('videos').get(key);
+  req.onsuccess = e => res(e.target.result || null);
+  req.onerror   = e => rej(e.target.error);
+}));
+
+const idbDel = (key) => _dbPromise.then(db => new Promise((res, rej) => {
+  const tx = db.transaction('videos', 'readwrite');
+  tx.objectStore('videos').delete(key);
+  tx.oncomplete = res; tx.onerror = e => rej(e.target.error);
+}));
+
 /* ════════════════════════════════════════════════════════════
    DATA
    ════════════════════════════════════════════════════════════ */
@@ -72,6 +99,14 @@ const I = {
   layers:   (p={}) => <Ico {...p}><path d="M12 2l9 5-9 5-9-5 9-5z"/><path d="M3 12l9 5 9-5M3 17l9 5 9-5"/></Ico>,
   bookmark: (p={}) => <Ico {...p}><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></Ico>,
   image:    (p={}) => <Ico {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></Ico>,
+  trash:    (p={}) => <Ico {...p}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></Ico>,
+  cols:     (p={}) => (
+    <svg width={p.size||16} height={p.size||16} viewBox="0 0 16 16" fill="currentColor">
+      <rect x="1"  y="2" width="4" height="12" rx="1"/>
+      <rect x="6"  y="2" width="4" height="12" rx="1"/>
+      <rect x="11" y="2" width="4" height="12" rx="1"/>
+    </svg>
+  ),
 };
 
 /* ════════════════════════════════════════════════════════════
@@ -275,19 +310,21 @@ function Logo() {
   );
 }
 
-function AppBar({ activeTab, onTabChange, right }) {
+function AppBar({ activeTab, onTabChange, right, hideTabs }) {
   return (
     <header style={{ display:"flex", alignItems:"center", gap:18, padding:"0 24px", height:60,
                      borderBottom:"1px solid var(--border)", background:"var(--surface)", flex:"none", zIndex:10 }}>
       <Logo />
-      <nav style={{ display:"flex", gap:2, marginLeft:10 }}>
-        {["Library","Projects"].map(n=>(
-          <button key={n} onClick={()=>onTabChange(n)}
-            style={{ all:"unset", fontSize:13.5, fontWeight:600, padding:"7px 12px", borderRadius:8, cursor:"pointer",
-              color: n===activeTab ? "var(--text)" : "var(--text-3)",
-              background: n===activeTab ? "var(--surface-2)" : "transparent" }}>{n}</button>
-        ))}
-      </nav>
+      {!hideTabs && (
+        <nav style={{ display:"flex", gap:2, marginLeft:10 }}>
+          {["Library","Projects"].map(n=>(
+            <button key={n} onClick={()=>onTabChange(n)}
+              style={{ all:"unset", fontSize:13.5, fontWeight:600, padding:"7px 12px", borderRadius:8, cursor:"pointer",
+                color: n===activeTab ? "var(--text)" : "var(--text-3)",
+                background: n===activeTab ? "var(--surface-2)" : "transparent" }}>{n}</button>
+          ))}
+        </nav>
+      )}
       <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:10 }}>{right}</div>
     </header>
   );
@@ -298,7 +335,7 @@ function Legend() {
     <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
       {Object.entries(DIMS).map(([k,v])=>(
         <span key={k} style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color:"var(--text-3)", fontWeight:600 }}>
-          <span style={{ width:8, height:8, borderRadius:3, background:`var(--tag-${k}-fg)` }} />{v.label}
+          <span style={{ width:8, height:8, borderRadius:3, background:'var(--border-2)' }} />{v.label}
         </span>
       ))}
     </div>
@@ -314,51 +351,423 @@ function ThemeToggle({ theme, onToggle }) {
 }
 
 /* ════════════════════════════════════════════════════════════
+   TAG EDITOR — reusable in preview modal
+   ════════════════════════════════════════════════════════════ */
+
+function TagEditor({ dim, values, onChange }) {
+  const [adding, setAdding] = useState(false);
+  const [input, setInput]   = useState('');
+
+  const remove = v => onChange(values.filter(t => t !== v));
+
+  const commit = () => {
+    const v = input.trim();
+    if (v && !values.some(t => t.toLowerCase() === v.toLowerCase())) onChange([...values, v]);
+    setInput(''); setAdding(false);
+  };
+
+  return (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:7, alignItems:'center' }}>
+      {values.map(v => (
+        <button key={v} onClick={() => remove(v)} style={{
+          all:'unset', display:'inline-flex', alignItems:'center', gap:5,
+          fontFamily:'var(--font-body)', fontSize:12, fontWeight:600, lineHeight:1,
+          padding:'5px 6px 5px 9px', borderRadius:'var(--r-pill)', cursor:'pointer',
+          background:'var(--surface-2)', color:'var(--text-2)',
+          border:'1px solid var(--border-2)',
+        }}>
+          <span style={{ width:6, height:6, borderRadius:'50%', background:'currentColor', opacity:.85 }} />
+          {v}
+          <span style={{ display:'inline-flex', marginLeft:3, opacity:.7 }}><I.x size={12} /></span>
+        </button>
+      ))}
+      {adding ? (
+        <input autoFocus value={input} onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { setInput(''); setAdding(false); } }}
+          onBlur={commit} placeholder="Tag name…"
+          style={{ all:'unset', fontSize:12, fontWeight:500, lineHeight:1,
+            padding:'5px 10px', borderRadius:'var(--r-pill)',
+            border:'1.5px solid var(--accent)', color:'var(--text)',
+            background:'var(--surface)', width:110 }} />
+      ) : (
+        <button onClick={() => setAdding(true)} style={{
+          all:'unset', display:'inline-flex', alignItems:'center', gap:5, fontSize:12,
+          fontWeight:600, padding:'5px 9px', lineHeight:1, borderRadius:'var(--r-pill)',
+          border:'1px dashed var(--border-2)', cursor:'pointer', color:'var(--text-3)', whiteSpace:'nowrap',
+        }}>
+          <I.plus size={12} /> Add
+        </button>
+      )}
+    </div>
+  );
+}
+
+
+/* ════════════════════════════════════════════════════════════
+   TOAST
+   ════════════════════════════════════════════════════════════ */
+
+function Toast({ message, onDone }) {
+  const [leaving, setLeaving] = useState(false);
+  useEffect(() => {
+    const hide = setTimeout(() => setLeaving(true), 2400);
+    const done = setTimeout(onDone, 2800);
+    return () => { clearTimeout(hide); clearTimeout(done); };
+  }, []);
+  return ReactDOM.createPortal(
+    <div style={{
+      position:'fixed', bottom:32, left:'50%', zIndex:9999, pointerEvents:'none',
+      display:'flex', alignItems:'center', gap:9,
+      padding:'11px 20px', borderRadius:'var(--r-pill)',
+      background:'var(--text)', color:'var(--bg)',
+      fontFamily:'var(--font-body)', fontSize:14, fontWeight:600,
+      boxShadow:'0 8px 28px rgba(0,0,0,.28)',
+      animation: leaving ? 'toastOut .35s ease forwards' : 'toastIn .22s ease',
+    }}>
+      <I.check size={15} />{message}
+    </div>,
+    document.body
+  );
+}
+
+/* ════════════════════════════════════════════════════════════
+   ASSET PREVIEW MODAL
+   ════════════════════════════════════════════════════════════ */
+
+function AssetPreviewModal({ asset, onClose, onSave, showToast }) {
+  const [mode, setMode]           = useState('edit');
+  const [title, setTitle]         = useState(asset.title);
+  const [sourceUrl, setSourceUrl] = useState(asset.sourceUrl || '');
+  const [tags, setTags]           = useState({
+    industry:  [...(asset.tags.industry  || [])],
+    component: [...(asset.tags.component || [])],
+    style:     [...(asset.tags.style     || [])],
+    platform:  [...(asset.tags.platform  || [])],
+  });
+
+  useEffect(() => {
+    const onKey = e => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [mode]);
+
+  const displaySource = (() => {
+    const raw = sourceUrl.trim();
+    if (!raw) return asset.source !== 'uploaded' ? asset.source : null;
+    try { return new URL(raw.startsWith('http') ? raw : 'https://'+raw).hostname.replace(/^www\./, ''); }
+    catch { return raw; }
+  })();
+
+  const handleSave = () => {
+    const raw = sourceUrl.trim();
+    const finalUrl = raw && !raw.startsWith('http') ? 'https://' + raw : raw;
+    let source = displaySource || 'uploaded';
+    onSave({ ...asset, title, sourceUrl: finalUrl || null, source, tags });
+    showToast('Changes saved');
+    onClose();
+  };
+
+  const LinkSvg = ({ size=14 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/>
+      <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/>
+    </svg>
+  );
+
+  const CloseBtn = ({ onClick }) => (
+    <button onClick={onClick} style={{ all:'unset', width:28, height:28, borderRadius:7, cursor:'pointer',
+      display:'flex', alignItems:'center', justifyContent:'center',
+      color:'var(--text-3)', background:'var(--surface-2)' }}>
+      <I.x size={14} />
+    </button>
+  );
+
+  const ImagePanel = () => {
+    const [videoSrc, setVideoSrc] = useState(null);
+    useEffect(() => {
+      if (!asset.video || !asset.videoKey) return;
+      let objUrl;
+      idbGet(asset.videoKey).then(blob => {
+        if (blob) { objUrl = URL.createObjectURL(blob); setVideoSrc(objUrl); }
+      }).catch(() => {});
+      return () => { if (objUrl) URL.revokeObjectURL(objUrl); };
+    }, []);
+    return (
+      <div style={{ flex:'0 0 52%', background:'#000', position:'relative', minHeight:320, flexShrink:0,
+        display:'flex', alignItems:'center', justifyContent:'center' }}>
+        {asset.video && videoSrc
+          ? <video src={videoSrc} controls autoPlay={false}
+              style={{ width:'100%', height:'100%', objectFit:'contain', display:'block' }} />
+          : asset.imageUrl
+            ? <img src={asset.imageUrl} alt={title}
+                style={{ width:'100%', height:'100%', objectFit:'contain', display:'block' }} />
+            : <div style={{ position:'absolute', inset:0 }}><Thumb kind={asset.kind} /></div>}
+        {asset.video && !videoSrc && (
+          <div style={{ position:'absolute', top:12, left:12, display:'flex', alignItems:'center', gap:5,
+            padding:'4px 9px', borderRadius:999, background:'rgba(20,16,10,.65)', color:'#fff',
+            fontSize:11.5, fontWeight:600, backdropFilter:'blur(4px)' }}>
+            <I.play size={11} /> Clip
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return ReactDOM.createPortal(
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:200, display:'flex',
+      alignItems:'center', justifyContent:'center', padding:24,
+      background:'rgba(14,12,8,.72)', backdropFilter:'blur(14px)',
+      fontFamily:'var(--font-body)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ width:'100%', maxWidth:900, maxHeight:'90vh',
+        display:'flex', borderRadius:'var(--r-xl)', overflow:'hidden', background:'var(--surface)',
+        boxShadow:'0 40px 100px rgba(0,0,0,.55)', color:'var(--text)' }}>
+
+        <ImagePanel />
+
+        <div style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0 }}>
+
+          {mode === 'view' ? (<>
+            {/* View header */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end',
+              padding:'14px 16px', borderBottom:'1px solid var(--border)', flexShrink:0 }}>
+              <CloseBtn onClick={onClose} />
+            </div>
+
+            {/* View body */}
+            <div style={{ padding:'22px 22px', display:'flex', flexDirection:'column', gap:20, flex:1, overflowY:'auto' }}>
+              <div>
+                <h2 style={{ fontSize:20, fontWeight:800, letterSpacing:'-0.02em', margin:'0 0 8px' }}>{title}</h2>
+                {displaySource && (
+                  sourceUrl
+                    ? <a href={sourceUrl.startsWith('http') ? sourceUrl : 'https://'+sourceUrl}
+                        target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}
+                        style={{ display:'inline-flex', alignItems:'center', gap:5, fontSize:12.5,
+                          color:'var(--text-3)', fontFamily:'var(--font-mono)', textDecoration:'none' }}>
+                        <LinkSvg size={12}/>{displaySource}
+                      </a>
+                    : <span style={{ fontSize:12.5, color:'var(--text-3)', fontFamily:'var(--font-mono)' }}>
+                        {displaySource}
+                      </span>
+                )}
+              </div>
+              {Object.entries(DIMS).map(([dim, { label }]) => {
+                const vals = tags[dim];
+                if (!vals.length) return null;
+                return (
+                  <div key={dim} style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                    <span style={{ fontSize:11, fontWeight:700, letterSpacing:'.08em',
+                      textTransform:'uppercase', color:'var(--text-3)' }}>{label}</span>
+                    <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                      {vals.map(v => <Tag key={v} dim={dim}>{v}</Tag>)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* View footer */}
+            <div style={{ padding:'14px 20px', borderTop:'1px solid var(--border)', flexShrink:0 }}>
+              <button className="btn soft" style={{ width:'100%' }} onClick={() => setMode('edit')}>
+                Edit tags &amp; details
+              </button>
+            </div>
+          </>) : (<>
+            {/* Edit header */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+              padding:'14px 16px', borderBottom:'1px solid var(--border)', flexShrink:0 }}>
+              <span style={{ fontSize:13, fontWeight:700, color:'var(--text-2)' }}>Edit reference</span>
+              <CloseBtn onClick={onClose} />
+            </div>
+
+            {/* Edit form */}
+            <div style={{ padding:'18px 20px', display:'flex', flexDirection:'column', gap:16, flex:1, overflowY:'auto' }}>
+              <div style={{ display:'flex', flexDirection:'column', gap:7 }}>
+                <label style={{ fontSize:11.5, fontWeight:700, color:'var(--text-3)',
+                  letterSpacing:'.06em', textTransform:'uppercase' }}>Title</label>
+                <div className="field" style={{ padding:'9px 12px' }}>
+                  <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Reference title" />
+                </div>
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:7 }}>
+                <label style={{ fontSize:11.5, fontWeight:700, color:'var(--text-3)',
+                  letterSpacing:'.06em', textTransform:'uppercase' }}>
+                  Source URL <span style={{ fontWeight:400, textTransform:'none', letterSpacing:0 }}>— optional</span>
+                </label>
+                <div className="field" style={{ padding:'9px 12px' }}>
+                  <span style={{ color:'var(--text-3)', flex:'none', display:'flex' }}><LinkSvg /></span>
+                  <input value={sourceUrl} onChange={e => setSourceUrl(e.target.value)}
+                    placeholder="https://dribbble.com/…" />
+                </div>
+              </div>
+              {Object.entries(DIMS).map(([dim, { label }]) => (
+                <div key={dim} style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+                    <span style={{ width:8, height:8, borderRadius:3,
+                      background:'var(--border-2)', flex:'none' }} />
+                    <label style={{ fontSize:11.5, fontWeight:700, color:'var(--text-3)',
+                      letterSpacing:'.06em', textTransform:'uppercase' }}>{label}</label>
+                    <span style={{ fontSize:11.5, color:'var(--text-3)' }}>
+                      {tags[dim].length} tag{tags[dim].length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <TagEditor dim={dim} values={tags[dim]}
+                    onChange={v => setTags(prev => ({ ...prev, [dim]: v }))} />
+                </div>
+              ))}
+            </div>
+
+            {/* Edit footer */}
+            <div style={{ padding:'14px 20px', borderTop:'1px solid var(--border)',
+              display:'flex', gap:10, flexShrink:0 }}>
+              <button className="btn ghost" style={{ flex:'none' }} onClick={onClose}>Cancel</button>
+              <button className="btn primary" style={{ flex:1 }} onClick={handleSave}>
+                <I.check size={15} /> Save changes
+              </button>
+            </div>
+          </>)}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+
+/* ════════════════════════════════════════════════════════════
    SCREEN 1 — LIBRARY VIEW
    ════════════════════════════════════════════════════════════ */
 
-function AssetCard({ a }) {
+/* ════════════════════════════════════════════════════════════
+   DELETE CONFIRM MODAL
+   ════════════════════════════════════════════════════════════ */
+
+function DeleteConfirmModal({ title, onCancel, onConfirm }) {
+  useEffect(() => {
+    const onKey = e => { if (e.key === 'Escape') onCancel(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
+  return ReactDOM.createPortal(
+    <div onClick={onCancel} style={{
+      position:'fixed', inset:0, zIndex:300, display:'flex',
+      alignItems:'center', justifyContent:'center', padding:24,
+      background:'rgba(14,12,8,.72)', backdropFilter:'blur(14px)',
+      fontFamily:'var(--font-body)',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width:'100%', maxWidth:400, borderRadius:'var(--r-xl)',
+        background:'var(--surface)', border:'1px solid var(--border)',
+        boxShadow:'0 32px 80px rgba(0,0,0,.5)', padding:'28px 28px 24px',
+        display:'flex', flexDirection:'column', gap:16, color:'var(--text)',
+      }}>
+        <div style={{ width:44, height:44, borderRadius:12, display:'flex', alignItems:'center',
+          justifyContent:'center', background:'color-mix(in oklab,#E0654A 14%,var(--surface))',
+          color:'#C14B32' }}>
+          <I.trash size={20} />
+        </div>
+        <div>
+          <h3 style={{ margin:'0 0 6px', fontSize:17, fontWeight:700, letterSpacing:'-0.01em' }}>
+            Delete this reference?
+          </h3>
+          <p style={{ margin:0, fontSize:14, color:'var(--text-2)', lineHeight:1.5 }}>
+            <b style={{ color:'var(--text)' }}>"{title}"</b> will be permanently removed from your library. This can't be undone.
+          </p>
+        </div>
+        <div style={{ display:'flex', gap:10, marginTop:4 }}>
+          <button className="btn ghost" style={{ flex:1 }} onClick={onCancel}>Cancel</button>
+          <button onClick={onConfirm} style={{
+            all:'unset', flex:1, display:'inline-flex', alignItems:'center', justifyContent:'center',
+            gap:8, padding:'10px 16px', borderRadius:'var(--r-sm)', cursor:'pointer',
+            fontFamily:'var(--font-body)', fontWeight:600, fontSize:14,
+            background:'#C14B32', color:'#fff',
+          }}>
+            <I.trash size={15} /> Delete
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function AssetCard({ a, onClick, onDelete }) {
+  const [hovered, setHovered]           = useState(false);
+  const [confirmingDelete, setConfirming] = useState(false);
   const flat = [];
   ["industry","component","style","platform"].forEach(dim=>(a.tags[dim]||[]).forEach(v=>flat.push([dim,v])));
   const shown = flat.slice(0, 4);
   const extra = flat.length - shown.length;
   return (
-    <figure className="card" style={{ margin:0, overflow:"hidden", display:"flex", flexDirection:"column", cursor:"pointer" }}>
-      <div style={{ position:"relative", aspectRatio:"4 / 3", background:"var(--surface-2)" }}>
-        <Thumb kind={a.kind} />
-        {a.video && (
-          <div style={{ position:"absolute", top:10, left:10, display:"flex", alignItems:"center", gap:5,
-            padding:"4px 8px 4px 6px", borderRadius:999, background:"rgba(20,16,10,.6)", color:"#fff",
-            fontSize:11, fontWeight:600, backdropFilter:"blur(4px)" }}>
-            <I.play size={11} /> Clip
+    <>
+      <figure onClick={onClick} className="card"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{ margin:0, overflow:"hidden", display:"flex", flexDirection:"column", cursor:"pointer", position:"relative" }}>
+        <div style={{ position:"relative", aspectRatio:"4 / 3", background:"var(--surface-2)" }}>
+          {a.imageUrl ? (
+            <img src={a.imageUrl} alt={a.title}
+              style={{ position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" }} />
+          ) : (
+            <Thumb kind={a.kind} />
+          )}
+          {a.video && (
+            <div style={{ position:"absolute", top:10, left:10, display:"flex", alignItems:"center", gap:5,
+              padding:"4px 8px 4px 6px", borderRadius:999, background:"rgba(20,16,10,.6)", color:"#fff",
+              fontSize:11, fontWeight:600, backdropFilter:"blur(4px)" }}>
+              <I.play size={11} /> Clip
+            </div>
+          )}
+          {/* Delete button — appears on hover */}
+          {hovered && (
+            <button onClick={e => { e.stopPropagation(); setConfirming(true); }}
+              style={{ all:"unset", position:"absolute", top:10, right:10, width:30, height:30,
+                borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center",
+                background:"rgba(193,75,50,.88)", color:"#fff", cursor:"pointer",
+                backdropFilter:"blur(4px)", transition:".14s" }}>
+              <I.trash size={14} />
+            </button>
+          )}
+        </div>
+        <figcaption style={{ padding:"var(--card-pad)", display:"flex", flexDirection:"column", gap:9 }}>
+          <span style={{ fontWeight:600, fontSize:14, letterSpacing:"-0.01em" }}>{a.title}</span>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+            {shown.map(([dim,v],i)=><Tag key={i} dim={dim}>{v}</Tag>)}
+            {extra>0 && <span className="tag" style={{ background:"var(--surface-2)", color:"var(--text-3)", borderColor:"var(--border)" }}>+{extra}</span>}
           </div>
-        )}
-        <div style={{ position:"absolute", top:10, right:10, width:30, height:30, borderRadius:8,
-          display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(252,250,246,.92)",
-          color:"var(--text-2)", boxShadow:"0 2px 6px rgba(0,0,0,.12)" }}>
-          <I.bookmark size={15} />
-        </div>
-      </div>
-      <figcaption style={{ padding:"var(--card-pad)", display:"flex", flexDirection:"column", gap:9 }}>
-        <span style={{ fontWeight:600, fontSize:14, letterSpacing:"-0.01em" }}>{a.title}</span>
-        <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-          {shown.map(([dim,v],i)=><Tag key={i} dim={dim}>{v}</Tag>)}
-          {extra>0 && <span className="tag" style={{ background:"var(--surface-2)", color:"var(--text-3)", borderColor:"var(--border)" }}>+{extra}</span>}
-        </div>
-        <span style={{ fontSize:11.5, color:"var(--text-3)", fontFamily:"var(--font-mono)" }}>{a.source}</span>
-      </figcaption>
-    </figure>
+          <span style={{ fontSize:11.5, color:"var(--text-3)", fontFamily:"var(--font-mono)" }}>{a.source}</span>
+        </figcaption>
+      </figure>
+
+      {confirmingDelete && (
+        <DeleteConfirmModal
+          title={a.title}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => { setConfirming(false); onDelete(a.id); }} />
+      )}
+    </>
   );
 }
 
-function LibraryView({ theme, onToggleTheme, onAddAsset, onNewProject, onTabChange }) {
-  const [search, setSearch] = useState("");
+const SORT_OPTIONS = [
+  { value:"recent", label:"Most recent" },
+  { value:"oldest", label:"Oldest first" },
+  { value:"az",     label:"A → Z" },
+  { value:"za",     label:"Z → A" },
+];
+
+function LibraryView({ assets, onUpdateAsset, onDeleteAsset, showToast, theme, onToggleTheme, onAddAsset, onNewProject, onTabChange }) {
+  const [search, setSearch]               = useState("");
   const [activeFilters, setActiveFilters] = useState([]);
+  const [previewAsset, setPreviewAsset]   = useState(null);
+  const [cols, setCols]                   = useState(4);
+  const [sortBy, setSortBy]               = useState("recent");
 
   const toggleFilter = key =>
     setActiveFilters(prev => prev.includes(key) ? prev.filter(f=>f!==key) : [...prev, key]);
 
-  const filtered = ASSETS.filter(a => {
+  const filtered = assets.filter(a => {
     const q = search.toLowerCase();
     const matchSearch = !q ||
       a.title.toLowerCase().includes(q) ||
@@ -372,12 +781,18 @@ function LibraryView({ theme, onToggleTheme, onAddAsset, onNewProject, onTabChan
     });
   });
 
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "oldest") return a.id - b.id;
+    if (sortBy === "az")     return a.title.localeCompare(b.title);
+    if (sortBy === "za")     return b.title.localeCompare(a.title);
+    return b.id - a.id; // most recent
+  });
+
   return (
     <div className="mb mb-grain screen-enter" style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
       <AppBar activeTab="Library" onTabChange={onTabChange} right={
         <>
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-          <button className="btn soft" style={{ padding:"8px 10px" }}><I.sliders size={15} /></button>
           <button className="btn primary" onClick={onAddAsset}><I.plus size={15} /> Add asset</button>
           <div style={{ width:30, height:30, borderRadius:"50%", background:"var(--surface-3)", border:"1px solid var(--border-2)", marginLeft:4 }} />
         </>
@@ -385,30 +800,56 @@ function LibraryView({ theme, onToggleTheme, onAddAsset, onNewProject, onTabChan
 
       <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
         {/* Title row */}
-        <div style={{ padding:"22px 28px 0", display:"flex", alignItems:"flex-end", justifyContent:"space-between", gap:20, flexWrap:"wrap" }}>
-          <div>
-            <h1 style={{ fontSize:26, fontWeight:800, letterSpacing:"-0.025em" }}>Library</h1>
-            <p style={{ margin:"5px 0 0", color:"var(--text-2)", fontSize:14 }}>
-              <b style={{ color:"var(--text)", fontWeight:700 }}>{filtered.length}</b> of {ASSETS.length} references · tagged across four dimensions
-            </p>
-          </div>
-          <Legend />
+        <div style={{ padding:"22px 28px 0" }}>
+          <h1 style={{ fontSize:26, fontWeight:800, letterSpacing:"-0.025em" }}>Library</h1>
+          <p style={{ margin:"5px 0 0", color:"var(--text-2)", fontSize:14 }}>
+            <b style={{ color:"var(--text)", fontWeight:700 }}>{sorted.length}</b> of {assets.length} references
+          </p>
         </div>
 
         {/* Controls */}
         <div style={{ padding:"16px 28px 14px", display:"flex", flexDirection:"column", gap:12 }}>
-          <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-            <div className="field" style={{ flex:1, maxWidth:380 }}>
+          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+            <div className="field" style={{ flex:1, maxWidth:420 }}>
               <I.search size={16} />
               <input placeholder="Search title, source, or tag…" value={search}
                 onChange={e=>setSearch(e.target.value)} />
             </div>
-            <div style={{ marginLeft:"auto", display:"flex", gap:8, alignItems:"center" }}>
-              <span style={{ fontSize:12.5, color:"var(--text-3)", fontWeight:600 }}>Sort</span>
-              <div className="field" style={{ padding:"8px 12px", gap:8, cursor:"pointer" }}>
-                <span style={{ fontSize:13, fontWeight:600 }}>Recently added</span>
-                <I.chevdown size={14} />
+
+            <div style={{ marginLeft:"auto", display:"flex", gap:10, alignItems:"center" }}>
+            {/* Sort */}
+            <select value={sortBy} onChange={e=>setSortBy(e.target.value)}
+              style={{ all:"unset", display:"flex", alignItems:"center", height:40,
+                padding:"0 32px 0 12px", borderRadius:"var(--r-sm)", fontSize:13.5, fontWeight:600,
+                border:"1px solid var(--border-2)", background:"var(--surface)", color:"var(--text)",
+                cursor:"pointer", appearance:"none", fontFamily:"var(--font-body)",
+                backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E")`,
+                backgroundRepeat:"no-repeat", backgroundPosition:"right 10px center" }}>
+              {SORT_OPTIONS.map(o=>(
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+
+            {/* Column picker */}
+            <div style={{ display:"flex", height:40, borderRadius:"var(--r-sm)",
+              border:"1px solid var(--border-2)", background:"var(--surface)", overflow:"hidden" }}>
+              {/* Icon */}
+              <div style={{ display:"flex", alignItems:"center", padding:"0 10px",
+                borderRight:"1px solid var(--border-2)", color:"var(--text-3)" }}>
+                <I.cols size={13} />
               </div>
+              {/* Numbers */}
+              {[3,4,5].map(n=>(
+                <button key={n} onClick={()=>setCols(n)} style={{ all:"unset", width:34, height:"100%",
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  cursor:"pointer", fontSize:13, fontWeight:700, transition:".12s",
+                  background: n===cols ? "var(--surface-2)" : "transparent",
+                  color: n===cols ? "var(--text)" : "var(--text-3)",
+                  borderRight: n!==5 ? "1px solid var(--border)" : "none" }}>
+                  {n}
+                </button>
+              ))}
+            </div>
             </div>
           </div>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
@@ -418,7 +859,7 @@ function LibraryView({ theme, onToggleTheme, onAddAsset, onNewProject, onTabChan
               const on = activeFilters.includes(key);
               return (
                 <button key={i} className={"pill"+(on?" on":"")} onClick={()=>toggleFilter(key)}>
-                  {!on && <span className="swatch" style={{ background:`var(--tag-${dim}-fg)` }} />}{v}
+                  {v}
                 </button>
               );
             })}
@@ -435,12 +876,20 @@ function LibraryView({ theme, onToggleTheme, onAddAsset, onNewProject, onTabChan
               <p style={{ fontSize:13, margin:0 }}>Try a different search or clear filters</p>
             </div>
           ) : (
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(var(--grid-min), 1fr))", gap:"var(--grid-gap)" }}>
-              {filtered.map(a=><AssetCard key={a.id} a={a} />)}
+            <div style={{ display:"grid", gridTemplateColumns:`repeat(${cols}, 1fr)`, gap:"var(--grid-gap)" }}>
+              {sorted.map(a=><AssetCard key={a.id} a={a} onClick={()=>setPreviewAsset(a)} onDelete={onDeleteAsset} />)}
             </div>
           )}
         </div>
       </div>
+
+      {previewAsset && (
+        <AssetPreviewModal
+          asset={previewAsset}
+          onClose={() => setPreviewAsset(null)}
+          showToast={showToast}
+          onSave={updated => { onUpdateAsset(updated); }} />
+      )}
     </div>
   );
 }
@@ -457,9 +906,9 @@ function SuggestTag({ dim, value, confirmed, onToggle }) {
       padding:"5px 6px 5px 9px", borderRadius:"var(--r-pill)", cursor:"pointer",
       letterSpacing:".01em", whiteSpace:"nowrap", opacity: confirmed===false ? .55 : 1,
       ...(confirmed===false ? {
-        background:"transparent", borderColor:"var(--border-2)", border:"1px dashed var(--border-2)", color:"var(--text-3)"
+        background:"transparent", border:"1px dashed var(--border-2)", color:"var(--text-3)"
       } : {
-        background:`var(--tag-${dim}-bg)`, color:`var(--tag-${dim}-fg)`, border:`1px solid var(--tag-${dim}-bd)`
+        background:"var(--surface-2)", color:"var(--text)", border:"1px solid var(--border-2)"
       })
     }}>
       <span style={{ width:6, height:6, borderRadius:"50%", background:"currentColor", opacity:.85 }} />
@@ -475,10 +924,12 @@ function UploadFlow({ theme, onToggleTheme, onCancel, onSave, onTabChange }) {
   const EMPTY_TAGS = { confirmed:[], suggested:[] };
   const [dragging, setDragging]   = useState(false);
   const [file, setFile]           = useState(null);
-  const [fileUrl, setFileUrl]     = useState(null);
+  const [fileUrl, setFileUrl]     = useState(null);  // blob URL (preview only)
+  const [fileDataUrl, setFileDataUrl] = useState(null); // base64 (persisted)
   const [title, setTitle]         = useState("");
   const [addingDim, setAddingDim] = useState(null);
   const [addInput, setAddInput]   = useState("");
+  const [sourceUrl, setSourceUrl] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [apiError, setApiError]   = useState(null);
   const [apiKey, setApiKey]       = useState(() => localStorage.getItem('mb_apikey') || '');
@@ -488,6 +939,20 @@ function UploadFlow({ theme, onToggleTheme, onCancel, onSave, onTabChange }) {
     style:     { ...EMPTY_TAGS }, platform:  { ...EMPTY_TAGS },
   });
   const fileInputRef = useRef(null);
+  const videoKeyRef  = useRef(null);
+  const videoRef     = useRef(null);
+
+  const captureCurrentFrame = () => {
+    const vid = videoRef.current;
+    if (!vid) return;
+    const scale = Math.min(1, 800 / Math.max(vid.videoWidth || 1, vid.videoHeight || 1));
+    const w = Math.round((vid.videoWidth  || 640) * scale);
+    const h = Math.round((vid.videoHeight || 360) * scale);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(vid, 0, 0, w, h);
+    setFileDataUrl(cv.toDataURL('image/jpeg', 0.85));
+  };
 
   /* ── Image / video → base64 helpers ── */
   const toBase64DataUrl = f => new Promise((res, rej) => {
@@ -506,6 +971,21 @@ function UploadFlow({ theme, onToggleTheme, onCancel, onSave, onTabChange }) {
       cv.width = w; cv.height = h;
       cv.getContext('2d').drawImage(img, 0, 0, w, h);
       res(cv.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = () => res(dataUrl);
+    img.src = dataUrl;
+  });
+
+  // Smaller version for localStorage (keeps file size manageable)
+  const resizeForStorage = dataUrl => new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, 800 / Math.max(img.width, img.height));
+      const w = Math.round(img.width * s), h = Math.round(img.height * s);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      res(cv.toDataURL('image/jpeg', 0.75));
     };
     img.onerror = () => res(dataUrl);
     img.src = dataUrl;
@@ -610,14 +1090,37 @@ platform: Web, Mobile, Desktop, Tablet` }
     const url = URL.createObjectURL(f);
     setFile(f);
     setFileUrl(url);
+    setFileDataUrl(null);
     setTitle(f.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' '));
     setTags({ industry:{...EMPTY_TAGS}, component:{...EMPTY_TAGS}, style:{...EMPTY_TAGS}, platform:{...EMPTY_TAGS} });
     analyze(f, url, apiKey);
+    // Store video blob in IndexedDB so the modal can play it back
+    if (f.type.startsWith('video/')) {
+      const key = 'vid_' + Date.now();
+      videoKeyRef.current = key;
+      idbPut(key, f).catch(() => {});
+    } else {
+      videoKeyRef.current = null;
+    }
+    // Generate compressed data URL for localStorage persistence
+    (async () => {
+      try {
+        let dataUrl;
+        if (f.type.startsWith('video/')) {
+          dataUrl = await captureVideoFrame(url);
+        } else {
+          const raw = await toBase64DataUrl(f);
+          dataUrl = await resizeForStorage(raw);
+        }
+        if (dataUrl) setFileDataUrl(dataUrl);
+      } catch { /* ignore */ }
+    })();
   };
 
   const removeFile = () => {
     if (fileUrl) URL.revokeObjectURL(fileUrl);
-    setFile(null); setFileUrl(null); setTitle(''); setApiError(null);
+    if (videoKeyRef.current) { idbDel(videoKeyRef.current).catch(() => {}); videoKeyRef.current = null; }
+    setFile(null); setFileUrl(null); setFileDataUrl(null); setTitle(''); setSourceUrl(''); setApiError(null);
     setTags({ industry:{...EMPTY_TAGS}, component:{...EMPTY_TAGS}, style:{...EMPTY_TAGS}, platform:{...EMPTY_TAGS} });
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -675,7 +1178,7 @@ platform: Web, Mobile, Desktop, Tablet` }
 
   return (
     <div className="mb mb-grain screen-enter" style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
-      <AppBar activeTab="Library" onTabChange={onTabChange} right={
+      <AppBar activeTab="Library" onTabChange={onTabChange} hideTabs right={
         <>
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
           <button className="btn ghost" onClick={onCancel}><I.x size={15} /> Cancel</button>
@@ -686,7 +1189,7 @@ platform: Web, Mobile, Desktop, Tablet` }
         {/* Left — unified drop / preview zone */}
         <div style={{ padding:"28px 32px", overflowY:"auto", borderRight:"1px solid var(--border)" }}>
           <span className="eyebrow">Step 1 · Upload</span>
-          <h1 style={{ fontSize:24, fontWeight:800, letterSpacing:"-0.025em", margin:"6px 0 4px" }}>Add a reference</h1>
+          <h1 style={{ fontSize:24, fontWeight:800, letterSpacing:"-0.025em", margin:"6px 0 4px" }}>Add an asset</h1>
           <p style={{ color:"var(--text-2)", fontSize:14, margin:"0 0 20px" }}>
             Drop a screenshot or short clip. Moodbase analyses it and proposes tags.
           </p>
@@ -694,31 +1197,67 @@ platform: Web, Mobile, Desktop, Tablet` }
           {/* The big box: drop zone OR file preview */}
           {fileUrl ? (
             /* ── Preview state ── */
-            <div style={{ position:"relative", borderRadius:"var(--r-lg)", overflow:"hidden",
-              border:"1px solid var(--border)", boxShadow:"var(--shadow)", background:"#000" }}>
-              {isVideo ? (
-                <video src={fileUrl} controls style={{ display:"block", width:"100%", maxHeight:480, objectFit:"contain", background:"#000" }} />
-              ) : (
-                <img src={fileUrl} alt={file.name}
-                  style={{ display:"block", width:"100%", maxHeight:480, objectFit:"contain", background:"var(--surface-2)" }} />
-              )}
-              {/* File badge */}
-              <div style={{ position:"absolute", top:12, left:12, display:"flex", alignItems:"center", gap:5,
-                padding:"4px 9px", borderRadius:999, background:"rgba(20,16,10,.68)", color:"#fff",
-                fontSize:11.5, fontWeight:600, whiteSpace:"nowrap", backdropFilter:"blur(4px)" }}>
-                {isVideo ? <I.play size={11} /> : <I.image size={12} />}
-                {file.name} · {fmtSize(file.size)}
+            <>
+              <div style={{ position:"relative", borderRadius:"var(--r-lg)", overflow:"hidden",
+                border:"1px solid var(--border)", boxShadow:"var(--shadow)", background:"#000" }}>
+                {isVideo ? (
+                  <video ref={videoRef} src={fileUrl} controls
+                    style={{ display:"block", width:"100%", maxHeight:460, objectFit:"contain", background:"#000" }} />
+                ) : (
+                  <img src={fileUrl} alt={file.name}
+                    style={{ display:"block", width:"100%", maxHeight:460, objectFit:"contain", background:"var(--surface-2)" }} />
+                )}
+                {/* File badge */}
+                <div style={{ position:"absolute", top:12, left:12, display:"flex", alignItems:"center", gap:5,
+                  padding:"4px 9px", borderRadius:999, background:"rgba(20,16,10,.68)", color:"#fff",
+                  fontSize:11.5, fontWeight:600, whiteSpace:"nowrap", backdropFilter:"blur(4px)" }}>
+                  {isVideo ? <I.play size={11} /> : <I.image size={12} />}
+                  {file.name} · {fmtSize(file.size)}
+                </div>
+                {/* Remove button */}
+                <button onClick={removeFile}
+                  style={{ all:"unset", position:"absolute", top:10, right:10, width:30, height:30,
+                    borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center",
+                    background:"rgba(20,16,10,.68)", color:"#fff", cursor:"pointer",
+                    backdropFilter:"blur(4px)", transition:".14s" }}
+                  title="Remove file">
+                  <I.x size={14} />
+                </button>
               </div>
-              {/* Remove button */}
-              <button onClick={removeFile}
-                style={{ all:"unset", position:"absolute", top:10, right:10, width:30, height:30,
-                  borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center",
-                  background:"rgba(20,16,10,.68)", color:"#fff", cursor:"pointer",
-                  backdropFilter:"blur(4px)", transition:".14s" }}
-                title="Remove file">
-                <I.x size={14} />
-              </button>
-            </div>
+
+              {/* ── Thumbnail frame picker (video only) ── */}
+              {isVideo && (
+                <div style={{ marginTop:14, padding:"14px 16px", borderRadius:"var(--r-md)",
+                  border:"1px solid var(--border)", background:"var(--surface)",
+                  display:"flex", alignItems:"center", gap:14 }}>
+                  {/* Current thumbnail preview */}
+                  <div style={{ flex:"none", width:76, height:50, borderRadius:8, overflow:"hidden",
+                    background:"var(--surface-2)", border:"1px solid var(--border-2)" }}>
+                    {fileDataUrl
+                      ? <img src={fileDataUrl} alt="thumbnail"
+                          style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                      : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center",
+                          justifyContent:"center", color:"var(--text-3)" }}>
+                          <I.image size={18} />
+                        </div>}
+                  </div>
+                  {/* Instructions */}
+                  <div style={{ flex:1 }}>
+                    <p style={{ margin:"0 0 3px", fontSize:13.5, fontWeight:700, color:"var(--text)" }}>
+                      Thumbnail frame
+                    </p>
+                    <p style={{ margin:0, fontSize:12.5, color:"var(--text-3)", lineHeight:1.45 }}>
+                      Scrub or pause the video at any moment, then capture that frame.
+                    </p>
+                  </div>
+                  {/* Capture button */}
+                  <button className="btn soft" style={{ flex:"none", whiteSpace:"nowrap" }}
+                    onClick={captureCurrentFrame}>
+                    Capture frame
+                  </button>
+                </div>
+              )}
+            </>
           ) : (
             /* ── Empty / drop-zone state ── */
             <div
@@ -845,7 +1384,7 @@ platform: Web, Mobile, Desktop, Tablet` }
           {file && !analyzing && Object.entries(tags).map(([dim, {confirmed, suggested}])=>(
             <div key={dim}>
               <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:9 }}>
-                <span style={{ width:9, height:9, borderRadius:3, background:`var(--tag-${dim}-fg)`, flex:"none" }} />
+                <span style={{ width:9, height:9, borderRadius:3, background:'var(--border-2)', flex:"none" }} />
                 <span style={{ fontSize:13, fontWeight:700, letterSpacing:"-0.01em", whiteSpace:"nowrap" }}>
                   {DIMS[dim].label}
                 </span>
@@ -904,11 +1443,47 @@ platform: Web, Mobile, Desktop, Tablet` }
                 placeholder={file ? "Give this reference a name…" : "Upload a file first…"}
                 disabled={!file} />
             </div>
+            <label style={{ fontSize:12.5, fontWeight:700, color:"var(--text-2)" }}>
+              Source URL <span style={{ fontWeight:400, color:"var(--text-3)" }}>— optional</span>
+            </label>
+            <div className="field">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                style={{ color:"var(--text-3)", flex:"none" }}>
+                <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/>
+                <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/>
+              </svg>
+              <input value={sourceUrl} onChange={e=>setSourceUrl(e.target.value)}
+                placeholder="https://dribbble.com/…" disabled={!file}
+                onBlur={e => {
+                  // auto-prefix https:// if user typed a bare domain
+                  const v = e.target.value.trim();
+                  if (v && !v.startsWith('http')) setSourceUrl('https://' + v);
+                }} />
+            </div>
             <div style={{ display:"flex", gap:10, marginTop:6 }}>
               <button className="btn ghost" style={{ flex:"none" }} onClick={onCancel}>Discard</button>
               <button className="btn primary"
                 style={{ flex:1, opacity: file?1:.45, pointerEvents: file?"auto":"none" }}
-                onClick={onSave}>
+                onClick={() => onSave({
+                  id: Date.now(),
+                  _user: true,
+                  videoKey: videoKeyRef.current || null,
+                  kind: "upload",
+                  title: title || file.name,
+                  sourceUrl: sourceUrl || null,
+                  source: sourceUrl
+                    ? (() => { try { return new URL(sourceUrl).hostname.replace(/^www\./,''); } catch { return sourceUrl; } })()
+                    : "uploaded",
+                  video: isVideo,
+                  imageUrl: fileDataUrl || fileUrl,
+                  tags: {
+                    industry:  tags.industry.confirmed,
+                    component: tags.component.confirmed,
+                    style:     tags.style.confirmed,
+                    platform:  tags.platform.confirmed,
+                  }
+                })}>
                 <I.check size={16} /> Confirm &amp; save to library
               </button>
             </div>
@@ -950,7 +1525,7 @@ function FormSection({ dim, label, hint, children }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:11 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ width:9, height:9, borderRadius:3, background:`var(--tag-${dim}-fg)`, flex:"none" }} />
+        <span style={{ width:9, height:9, borderRadius:3, background:'var(--border-2)', flex:"none" }} />
         <span style={{ fontSize:14, fontWeight:700, letterSpacing:"-0.01em", whiteSpace:"nowrap" }}>{label}</span>
         {hint && <span style={{ fontSize:12, color:"var(--text-3)", fontWeight:500, whiteSpace:"nowrap" }}>{hint}</span>}
       </div>
@@ -1305,10 +1880,26 @@ const DEFAULT_CTX = {
 };
 
 function App() {
-  const [theme, setTheme]       = useState("dark");
+  const [theme, setTheme]       = useState("light");
   const [accent]                = useState("#C2683E");
   const [screen, setScreen]     = useState("library");
+  const [toast, setToast]       = useState(null);
+  const [assets, setAssets]     = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('mb_user_assets') || '[]');
+      return [...(Array.isArray(saved) ? saved : []), ...ASSETS];
+    } catch { return ASSETS; }
+  });
   const [projectCtx, setProjectCtx] = useState(DEFAULT_CTX);
+
+  const showToast = msg => setToast(msg);
+
+  useEffect(() => {
+    try {
+      const userAssets = assets.filter(a => a._user);
+      localStorage.setItem('mb_user_assets', JSON.stringify(userAssets));
+    } catch { /* storage quota exceeded */ }
+  }, [assets]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1327,9 +1918,16 @@ function App() {
   const common = { theme, onToggleTheme: toggleTheme, onTabChange: handleTabChange };
 
   if (screen==="upload") return (
-    <UploadFlow {...common}
-      onCancel={() => setScreen("library")}
-      onSave={() => setScreen("library")} />
+    <>
+      <UploadFlow {...common}
+        onCancel={() => setScreen("library")}
+        onSave={asset => {
+          setAssets(prev => [asset, ...prev]);
+          setScreen("library");
+          showToast("Asset added to library");
+        }} />
+      {toast && <Toast message={toast} onDone={() => setToast(null)} />}
+    </>
   );
   if (screen==="newproject") return (
     <NewProjectForm {...common}
@@ -1341,10 +1939,21 @@ function App() {
       ctx={projectCtx}
       onEdit={() => setScreen("newproject")} />
   );
+
+  const updateAsset = updated =>
+    setAssets(prev => prev.map(a => a.id === updated.id ? updated : a));
+
+  const deleteAsset = id =>
+    setAssets(prev => prev.filter(a => a.id !== id));
+
   return (
-    <LibraryView {...common}
-      onAddAsset={() => setScreen("upload")}
-      onNewProject={() => setScreen("newproject")} />
+    <>
+      <LibraryView {...common} assets={assets} onUpdateAsset={updateAsset} onDeleteAsset={deleteAsset}
+        showToast={showToast}
+        onAddAsset={() => setScreen("upload")}
+        onNewProject={() => setScreen("newproject")} />
+      {toast && <Toast message={toast} onDone={() => setToast(null)} />}
+    </>
   );
 }
 
